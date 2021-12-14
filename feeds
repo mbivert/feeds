@@ -1,0 +1,116 @@
+#!/bin/sh
+
+# Simple feed "manager"
+
+set -e
+set -o pipefail
+
+seen=$HOME/.feeds.seen
+feeds=$HOME/.feeds
+
+touch $seen
+
+if ! which curl >/dev/null; then
+	echo 'curl(1) not found in $PATH' 1>&2
+	exit 1
+fi
+
+if ! which xmllint > /dev/null; then
+	echo 'xmllint(1) (from libxml(3)) not found in $PATH' 1>&2
+	exit 1
+fi
+
+if [ "$1" = "-h" ]; then
+	p=`basename $0`
+	cat <<EOF
+NAME
+	$p
+
+SYNOPSYS
+	$p [-h]
+	$p [-anv]
+
+DESCRIPTION
+	Simple feeds manager. Reads feeds URLs from \$HOME/.feeds, one per
+	line, two fields per line: field type and URL:
+
+	  <atom|rss>  <url/to/field>
+
+	Lines starting with a '#' are ignored (comments).
+
+	Display title and URL for all entries that aren't found in \$HOME/.feeds.seen,
+	unless -a is specified, in which case, all (remote) entries are
+	displayed.
+
+	Entries are automatically marked as read, that is appended
+	to \$HOME/.feeds.seen, unless -n is specified.
+
+	For primitive debugging purposes, -v can be used.
+
+EOF
+	exit 0
+fi
+
+mark="tee -a $seen"
+
+verbose=
+all=
+nomark=
+
+while getopts anv x; do
+	case $x in
+		a) all=1;;
+		n) nomark=1;;
+		v) verbose=1;;
+	esac
+done
+shift `expr $OPTIND - 1`
+
+if [ -n "$all" ]; then
+	seen=/dev/null
+fi
+
+if [ -n "$nomark" ]; then
+	mark="cat"
+fi
+
+if [ ! -e "$feeds" ]; then
+	exit 1
+fi
+
+rss='//link/text() | //title/text()'
+atomtitle="//*[name()='feed']/*[name()='entry']/*[name()='title']/text()"
+atomurl="//*[name()='feed']/*[name()='entry']/*[name()='link'][@rel='alternate']/@href"
+atom="$atomtitle | $atomurl"
+
+grep -v '[ \t]*#' $feeds | while read x; do
+	set -- $x
+	f="$rss"
+	if [ "$1" == "atom" ]; then
+		f="$atom"
+	fi
+
+	# XXX: Quirky, but useful
+	fn=/dev/null
+	if [ -n "$verbose" ]; then
+		fn="/tmp/feeds.$$"
+		echo Processing $2, see $fn...
+	fi
+
+	# XXX: In case of atom, attribute value fetching
+	# systematically  embeds attribute name (e.g. " href='...'");
+	# using string() just grabs the first one, so we hack around
+
+	curl -s "$2" | tee $fn \
+		| xmllint --xpath "$f" - \
+		| sed '/href="/{s/ href="//;s/"$//}' \
+		| sed -n 'N;s/\n/ /p' | while read y; do
+			if ! grep -qF "$y" $seen; then
+				echo "$y" | $mark
+			fi
+		done
+
+	if [ "$fn" != "/dev/null" ]; then
+		rm $fn;
+	fi
+done
